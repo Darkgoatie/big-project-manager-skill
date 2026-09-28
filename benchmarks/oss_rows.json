@@ -1,0 +1,79 @@
+[
+ {
+  "case": "chalk/chalk (small)",
+  "files": "32",
+  "repo tok": "20,767",
+  "tasks": 5,
+  "no-skill Mtok": "5.01",
+  "skill Mtok": "1.89",
+  "saving": "62% (p5-p95 47..72)",
+  "bar": 0.6226421267988724,
+  "ok": true
+ },
+ {
+  "case": "psf/requests (small)",
+  "files": "124",
+  "repo tok": "713,379",
+  "tasks": 20,
+  "no-skill Mtok": "24.50",
+  "skill Mtok": "10.53",
+  "saving": "57% (p5-p95 51..62)",
+  "bar": 0.5700600383546583,
+  "ok": true
+ },
+ {
+  "case": "pallets/flask (medium)",
+  "files": "227",
+  "repo tok": "288,980",
+  "tasks": 37,
+  "no-skill Mtok": "45.23",
+  "skill Mtok": "15.02",
+  "saving": "67% (p5-p95 64..70)",
+  "bar": 0.6678711097973185,
+  "ok": true
+ },
+ {
+  "case": "expressjs/express (medium)",
+  "files": "214",
+  "repo tok": "179,278",
+  "tasks": 35,
+  "no-skill Mtok": "42.73",
+  "skill Mtok": "13.60",
+  "saving": "68% (p5-p95 65..72)",
+  "bar": 0.6816869924141941,
+  "ok": true
+ },
+ {
+  "case": "facebook/react (big)",
+  "files": "7,143",
+  "repo tok": "7,921,134",
+  "tasks": 120,
+  "no-skill Mtok": "148.79",
+  "skill Mtok": "48.87",
+  "saving": "67% (p5-p95 66..69)",
+  "bar": 0.6715381297377295,
+  "ok": true
+ },
+ {
+  "case": "django/django (big)",
+  "files": "4,445",
+  "repo tok": "7,254,835",
+  "tasks": 120,
+  "no-skill Mtok": "148.78",
+  "skill Mtok": "50.75",
+  "saving": "66% (p5-p95 64..67)",
+  "bar": 0.6589301717443814,
+  "ok": true
+ },
+ {
+  "case": "microsoft/vscode (big)",
+  "files": "18,599",
+  "repo tok": "65,528,121",
+  "tasks": 120,
+  "no-skill Mtok": "148.68",
+  "skill Mtok": "57.52",
+  "saving": "61% (p5-p95 59..63)",
+  "bar": 0.6131454703611514,
+  "ok": true
+ }
+]
