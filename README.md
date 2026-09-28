@@ -1,5 +1,7 @@
 # big-project-manager
 
+**Saves tokens across the board: less context, fewer cache reads, and lower input and output token counts.** Sub-agents get only the task, its module spec and the files they own, so nobody rereads the repo, the cached prefix stays small, and replies stay short.
+
 A skill for coding agents (Hermes Agent, Claude Code, Codex, or anything else that reads `SKILL.md`) for projects that don't fit in one context window.
 
 I wrote it after watching agents fall apart on long jobs. They'd lose the plan after a restart, sub-agents would read half the repo to change one file, and "done" often meant a test got skipped. This skill makes the agent write the plan down, split the work into small checked tasks, and verify each one itself instead of trusting the sub-agent's report.
