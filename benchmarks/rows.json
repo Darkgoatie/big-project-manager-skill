@@ -1,0 +1,57 @@
+[
+ {
+  "case": "Fornals",
+  "files": 12,
+  "repo tok": "41,062",
+  "tasks": 3,
+  "no-skill Mtok": "3.03",
+  "skill Mtok": "1.48",
+  "saving": "51% (p5-p95 26..66)",
+  "bar": 0.5100115257908868,
+  "ok": true
+ },
+ {
+  "case": "TinyJev-Server-GUI",
+  "files": 30,
+  "repo tok": "74,903",
+  "tasks": 5,
+  "no-skill Mtok": "5.21",
+  "skill Mtok": "2.21",
+  "saving": "58% (p5-p95 45..66)",
+  "bar": 0.5754745041295102,
+  "ok": true
+ },
+ {
+  "case": "TachiKindle",
+  "files": 95,
+  "repo tok": "150,571",
+  "tasks": 15,
+  "no-skill Mtok": "17.88",
+  "skill Mtok": "5.91",
+  "saving": "67% (p5-p95 62..71)",
+  "bar": 0.6694162344455734,
+  "ok": true
+ },
+ {
+  "case": "JustCivilized",
+  "files": 232,
+  "repo tok": "452,209",
+  "tasks": 38,
+  "no-skill Mtok": "46.64",
+  "skill Mtok": "16.23",
+  "saving": "65% (p5-p95 63..69)",
+  "bar": 0.6520658738735998,
+  "ok": true
+ },
+ {
+  "case": "Arztalapp prototype",
+  "files": 232,
+  "repo tok": "978,279",
+  "tasks": 38,
+  "no-skill Mtok": "46.70",
+  "skill Mtok": "18.82",
+  "saving": "60% (p5-p95 56..64)",
+  "bar": 0.5969867386430621,
+  "ok": true
+ }
+]
