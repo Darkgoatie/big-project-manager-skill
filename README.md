@@ -22,8 +22,8 @@ When you hand the agent something big, like "build this" or "finish the rest of 
 5. Writes a numbered `TASKS.md`. Tasks are small, and each has one acceptance check you can actually observe, like "60 s run, 0 ERROR lines" rather than "tests pass". The first task is a thin end-to-end slice.
 6. Hands each task to a sub-agent with only what it needs: the task, its module spec, the interfaces it calls, and the files it may touch. It isn't allowed to explore the repo. If it needs something else it has to ask.
 7. Reviews the result itself. It reruns the smoke script, counts errors in the logs, checks the test diff for skips and removed asserts, looks for new functions nothing calls, and runs the real feature.
-8. Stops after two failed attempts on the same task and either splits it or asks you. Bad work is undone with `git revert`, never a reset.
-9. Updates the spec, the task list and `HANDOFF.md` after every task, so the docs never fall behind the code.
+8. Stops after two failed attempts on the same task and either splits it or asks you. A task that costs far more than its neighbours gets split too. Bad work is undone with `git revert`, never a reset.
+9. Updates the spec, the task list and `HANDOFF.md` after every task, so the docs never fall behind the code. `HANDOFF.md` records the commit it describes, so a resumed session notices if anything changed since.
 
 See [`examples/todo-api/`](examples/todo-api/) for what the files look like partway through a small project.
 
@@ -35,7 +35,7 @@ See [`examples/todo-api/`](examples/todo-api/) for what the files look like part
 
 **Tracking.** You can check that "done" really means done, because each task has a check you can see and every review compares against the baseline. A regression gets caught at the task that caused it, not three tasks later.
 
-**Your working tree is safe.** Sub-agents aren't allowed to reset, rebase, amend or stash, and a pre-commit hook ([`templates/hooks/pre-commit`](templates/hooks/pre-commit)) rejects edits outside a task's file list.
+**Your working tree is safe.** Sub-agents aren't allowed to reset, rebase, amend or stash, and a pre-commit hook ([`templates/hooks/pre-commit`](templates/hooks/pre-commit)) rejects edits outside a task's file list. If a sub-agent really needs another file, it files a scope request in `TASKS.md` and the run pauses until you approve it, so every widening is on record.
 
 **You stay in charge.** You approve the core model and the task list before anything runs, and a `STOP` line in `TASKS.md` pauses the run wherever you put it.
 

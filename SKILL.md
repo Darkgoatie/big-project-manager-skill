@@ -27,7 +27,7 @@ Don't use for: single-file fixes, one-sitting features, or exploratory spikes on
 ## 0. Inventory what exists
 Before writing anything, list the repo's existing design docs (ARCHITECTURE.md, blueprints/, API maps, TODO.md, progress logs). Link to them from the spec; write only what is missing. Duplicating an existing doc creates two sources that drift.
 
-If `docs/spec/` already exists, you are resuming: read HANDOFF.md and TASKS.md, then for every task marked in progress compare its listed commits with `git log --oneline`. Finish it, redo it, or mark it needs-fix before starting anything new.
+If `docs/spec/` already exists, you are resuming: read HANDOFF.md and TASKS.md. Compare the `Commit:` hash in HANDOFF.md with `git rev-parse HEAD`. If HEAD has moved, do not continue: list the commits since that hash, match each to a task in TASKS.md, and bring TASKS.md and HANDOFF.md up to date (or ask the user about commits no task explains) before anything else. Then for every task marked in progress compare its listed commits with `git log --oneline`. Finish it, redo it, or mark it needs-fix before starting anything new.
 
 ## 1. Write the spec
 In `docs/spec/` (or `plans/<project>/` when there is no repo):
@@ -57,15 +57,17 @@ Before the first task:
 - Number tasks and never renumber; users and reports refer to "task 14". Ideas raised mid-run are appended as pending with a new number and do not interrupt the current task.
 - Order: first a thin end-to-end slice (the real entry point exercising the core model with minimal features), then widen. It exposes a wrong architecture while it is cheap to change.
 - Size by cost too: long runs re-send a growing context every call, so cache reads dominate spend. Give each task a context budget, pin a reasoning effort (lower effort is several times cheaper for routine coding), and log each task's cost in TASKS.md so oversized tasks show. Treat budgets as defaults; tune them to the model and pricing in use.
+- Read cost as a scoping signal: a task that costs about three times its neighbours was usually cut badly, not hard. Stop it and split it rather than letting it run.
 - Support a `STOP` marker line: the runner halts there and waits for the user.
+- Scope requests: when a child needs a file outside its list, add a row to the Scope requests table in TASKS.md (task, file, one-line reason, pending) and set the task to blocked. The runner pauses there like a `STOP` line until the user approves or rejects it, then records the decision and date in the same row and, if approved, adds the file to the task's list. Never widen scope silently. Two or more requests for the same file across tasks mean the module boundary is wrong: fix the module spec instead of approving again.
 - Review the list before executing: merge trivial steps, split vague ones, reorder by dependency, drop anything outside the spec. Show it to the user and adjust.
-- Status per task: pending / in progress / done / needs-fix / reverted, with commit hashes and attempt count.
+- Status per task: pending / in progress / blocked / done / needs-fix / reverted, with commit hashes and attempt count.
 
 ## 5. Delegate with focused context
 Applies to any sub-agent mechanism (built-in subagents, spawned CLI agents, a second session). Without one, run tasks sequentially yourself under the same rules.
 - Pass only: the task text, that module's spec file, the interfaces of modules it calls, the exact files it may touch (as paths), the acceptance check and verification commands. Do not paste SPEC.md, other modules' specs, or unrelated source.
 - Tell it to read only the listed files plus what they directly import, not to explore the repo, and to report back if it needs anything else instead of searching for it. Children given freedom to look around spend most of their context reading.
-- Tell it not to edit other files, to report needed interface changes instead of making them, to commit each piece separately, and never to reset/rebase/amend/stash.
+- Tell it not to edit other files (if it needs one, it stops and reports the file and a one-line reason as a scope request), to report needed interface changes instead of making them, to commit each piece separately, and never to reset/rebase/amend/stash.
 - Never put secrets, tokens, or `.env` contents in a child's context; give it the variable name and let the environment supply the value.
 - Each child appends short progress lines to `docs/spec/progress/<task-id>.log` (step started, command run, result) so status is readable without the transcript.
 - Protect the user's uncommitted work with a pre-commit hook that rejects commits touching files outside the task's list, not just a prompt rule. Install `templates/hooks/pre-commit`, write the task's paths to `.git/bpm-allowed-files` before the task and delete it after.
@@ -90,7 +92,7 @@ Applies to any sub-agent mechanism (built-in subagents, spawned CLI agents, a se
 - A landed task that fails review: `git revert` its commits (never reset), mark it reverted, and move tasks that depend on it back to pending.
 
 ## 8. Update the spec after every change
-After each task lands: update the module file (interface, invariants, files), ARCHITECTURE.md if a decision changed, TASKS.md status and cost, and HANDOFF.md (current state, what is blocked, next task). Record deviations in one line. Commit with the code or right after. Never leave code and spec disagreeing.
+After each task lands: update the module file (interface, invariants, files), ARCHITECTURE.md if a decision changed, TASKS.md status and cost, and HANDOFF.md (current state, what is blocked, next task, and `Commit:` set to the hash it describes). Record deviations in one line. Commit with the code or right after. Never leave code and spec disagreeing.
 
 ## 9. Report
 After each task: commits, what you verified yourself (numbers vs baseline), cost, what is still open. Keep it short; don't replay the process.
@@ -112,5 +114,6 @@ The project is done when: every task is done or explicitly dropped by the user, 
 - [ ] Every module listed in SPEC.md has a file under `modules/` with interface, invariants and owned files.
 - [ ] TASKS.md: every task has an acceptance check, a status, and commit hashes if done.
 - [ ] Every done task was reviewed by you (smoke script, error counts, end-to-end run), not only by its child.
-- [ ] HANDOFF.md matches the current `git log`.
+- [ ] HANDOFF.md's `Commit:` hash is the current HEAD, and its state matches `git log`.
+- [ ] Every scope request in TASKS.md has a recorded decision.
 - [ ] No code change is left without a matching spec update.

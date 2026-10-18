@@ -27,6 +27,6 @@ EOF_FILES
 
 if [ -n "$bad" ]; then
   echo "pre-commit: these files are outside the task's file list:$bad"
-  echo "Report the needed change instead of committing it, or update $list."
+  echo "Unstage them and file a scope request in TASKS.md (file + one-line reason); the run pauses until the user decides."
   exit 1
 fi
