@@ -1,0 +1,22 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Repo checks
+        run: python scripts/check.py
+      - name: Shellcheck
+        run: shellcheck templates/smoke.sh templates/hooks/pre-commit

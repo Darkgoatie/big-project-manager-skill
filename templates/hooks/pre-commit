@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+# Rejects commits that touch files outside the current task's file list.
+# Install: cp templates/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Before each task, the runner writes the allowed paths (one per line, shell
+# globs allowed, # comments ignored) to .git/bpm-allowed-files and deletes it
+# afterwards. With no list present the hook allows everything.
+set -eu
+
+list="$(git rev-parse --git-dir)/bpm-allowed-files"
+[ -f "$list" ] || exit 0
+
+bad=""
+files=$(git diff --cached --name-only --diff-filter=ACMRD)
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  ok=0
+  while IFS= read -r pat || [ -n "$pat" ]; do
+    case "$pat" in ''|'#'*) continue ;; esac
+    # shellcheck disable=SC2254
+    case "$f" in $pat) ok=1; break ;; esac
+  done <"$list"
+  [ "$ok" -eq 1 ] || bad="$bad
+  $f"
+done <<EOF_FILES
+$files
+EOF_FILES
+
+if [ -n "$bad" ]; then
+  echo "pre-commit: these files are outside the task's file list:$bad"
+  echo "Report the needed change instead of committing it, or update $list."
+  exit 1
+fi

@@ -1,7 +1,7 @@
 ---
 name: big-project-manager
-description: Run large projects via living spec and verified sub-agents.
-version: 0.1.0
+description: Run large projects via living spec and verified sub-agents, with less context per call and a task history in files.
+version: 0.2.0
 author: Darkgoatie
 license: MIT
 platforms: [linux, macos, windows]
@@ -50,7 +50,7 @@ If two modules need each other's internals, the boundary is wrong. Fix the spec,
 ## 3. Baseline and smoke test
 Before the first task:
 - Record in SPEC.md: test pass/fail counts, build time, ERROR lines in a standard run, and the key performance numbers. Every review compares against these; any regression becomes a needs-fix task.
-- Commit one smoke script (`scripts/smoke.sh` / `.ps1`) that builds, runs the tests, and runs a short real scenario with error counting. Every task must pass it, so "verified" means the same thing for every agent.
+- Commit one smoke script (`scripts/smoke.sh` / `.ps1`) that builds, runs the tests, and runs a short real scenario with error counting. Start from `templates/smoke.sh`. Every task must pass it, so "verified" means the same thing for every agent.
 
 ## 4. Tasks in TASKS.md
 - `docs/spec/TASKS.md`, committed: small tasks (one sitting, a few commits), each with module, files touched, dependencies, and an observable acceptance check. "Tests pass" is not enough: name something you can see or measure ("a 60 s run of the standard scenario has 0 ERROR lines", "a client that stops reading for 2 s stays connected").
@@ -68,7 +68,7 @@ Applies to any sub-agent mechanism (built-in subagents, spawned CLI agents, a se
 - Tell it not to edit other files, to report needed interface changes instead of making them, to commit each piece separately, and never to reset/rebase/amend/stash.
 - Never put secrets, tokens, or `.env` contents in a child's context; give it the variable name and let the environment supply the value.
 - Each child appends short progress lines to `docs/spec/progress/<task-id>.log` (step started, command run, result) so status is readable without the transcript.
-- Protect the user's uncommitted work with a pre-commit hook that rejects commits touching files outside the task's list, not just a prompt rule.
+- Protect the user's uncommitted work with a pre-commit hook that rejects commits touching files outside the task's list, not just a prompt rule. Install `templates/hooks/pre-commit`, write the task's paths to `.git/bpm-allowed-files` before the task and delete it after.
 - Parallel only when file sets are disjoint and each child has its own git worktree; otherwise they share the index and collide. Default to sequential.
 - A one-shot child reads its prompt at start. Edit a task file before its turn, never while the runner may be starting it; if you must, stop and relaunch it.
 
