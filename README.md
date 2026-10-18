@@ -78,6 +78,7 @@ templates/
   TASKS.md            task table with status, attempts, cost
   HANDOFF.md          where things stand, what's next
   smoke.sh            build + test + short real run, with ERROR counting
+  smoke.ps1           the same for Windows PowerShell
   hooks/pre-commit    rejects commits outside the current task's files
 examples/todo-api/    a filled-in spec partway through a small project
 benchmarks/           modelled token savings (HTML tables + JSON rows)
