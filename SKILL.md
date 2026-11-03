@@ -50,7 +50,7 @@ If two modules need each other's internals, the boundary is wrong. Fix the spec,
 ## 3. Baseline and smoke test
 Before the first task:
 - Record in SPEC.md: test pass/fail counts, build time, ERROR lines in a standard run, and the key performance numbers. Every review compares against these; any regression becomes a needs-fix task.
-- Commit one smoke script (`scripts/smoke.sh` / `.ps1`) that builds, runs the tests, and runs a short real scenario with error counting. Start from `templates/smoke.sh`. Every task must pass it, so "verified" means the same thing for every agent.
+- Commit one smoke script (`scripts/smoke.sh` / `.ps1`) that builds, runs the tests, and runs a short real scenario with error counting. Start from `templates/smoke.sh` or `templates/smoke.ps1`. Every task must pass it, so "verified" means the same thing for every agent.
 
 ## 4. Tasks in TASKS.md
 - `docs/spec/TASKS.md`, committed: small tasks (one sitting, a few commits), each with module, files touched, dependencies, and an observable acceptance check. "Tests pass" is not enough: name something you can see or measure ("a 60 s run of the standard scenario has 0 ERROR lines", "a client that stops reading for 2 s stays connected").
