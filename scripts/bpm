@@ -1,0 +1,894 @@
+#!/bin/sh
+# bpm - task runner for the big-project-manager skill.
+#
+# POSIX sh; needs only git, awk, sed and grep. On Windows it runs under the sh
+# that ships with Git. After `bpm init`, call it from any shell as:
+#     git bpm <command>          (git bpm help)
+#
+# Tasks live in docs/spec/tasks/NNN.md (frontmatter + sections).
+# Runtime state lives in .git/bpm/ and is never staged.
+
+SPEC="${BPM_SPEC_DIR:-docs/spec}"
+TASKS="$SPEC/tasks"
+SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+TAB=$(printf '\t')
+TEST_PATHS="${BPM_TEST_PATHS:-tests test spec __tests__ *_test.* *.test.* *.spec.* test_*.py}"
+MAX_FILES_PER_COMMIT="${BPM_MAX_FILES_PER_COMMIT:-15}"
+MAX_ATTEMPTS=2
+EXTRA_READS="${BPM_EXTRA_READS:-12}"
+
+die() { echo "bpm: $*" >&2; exit 1; }
+need_git() { git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"; }
+
+# ---------------------------------------------------------------- helpers
+
+# Task id without leading zeros; fails on anything that is not a number.
+nid() {
+  case "$1" in ''|*[!0-9]*) echo "bpm: task id must be a number: '$1'" >&2; return 1 ;; esac
+  _n=$(printf '%s' "$1" | sed 's/^0*//')
+  printf '%s' "${_n:-0}"
+}
+
+tfile() { printf '%s/%03d.md' "$TASKS" "$1"; }
+
+task_ids() {
+  ls "$TASKS"/*.md 2>/dev/null | sed -nE 's|.*/0*([0-9]+)\.md$|\1|p' | sort -n
+}
+
+# fm <file> <key>: value of a frontmatter key.
+fm() {
+  awk -v k="$2" '
+    { sub(/\r$/, "") }
+    NR == 1 && $0 == "---" { infm = 1; next }
+    infm && $0 == "---" { exit }
+    infm {
+      i = index($0, ":")
+      if (i && substr($0, 1, i - 1) == k) {
+        v = substr($0, i + 1); gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit
+      }
+    }' "$1"
+}
+
+# fm_set <file> <key> <value>: set or add a frontmatter key.
+fm_set() {
+  BPM_FM_VALUE=$3 awk -v k="$2" '
+    BEGIN { v = ENVIRON["BPM_FM_VALUE"] }
+    { sub(/\r$/, "") }
+    NR == 1 && $0 == "---" { infm = 1; print; next }
+    infm && $0 == "---" { if (!done) print k ": " v; infm = 0; print; next }
+    infm {
+      i = index($0, ":")
+      if (i && substr($0, 1, i - 1) == k) { print k ": " v; done = 1; next }
+    }
+    { print }' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+# section <file> <heading>: body of a "## heading" section.
+section() {
+  awk -v h="## $2" '
+    { sub(/\r$/, "") }
+    $0 == h { on = 1; next }
+    on && /^## / { exit }
+    on && /^[ \t]*$/ { if (started) blanks++; next }
+    on { for (; blanks > 0; blanks--) print ""; started = 1; print }' "$1"
+}
+
+# norm_globs "<a, `b`, c>" -> "a,b,c"
+norm_globs() {
+  printf '%s' "$1" | tr -d '`\r' | sed 's/[[:space:]]*,[[:space:]]*/,/g; s/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# matches <path> <normalized comma-separated globs>. `*` also matches `/`;
+# a glob ending in `/` matches everything under that directory.
+matches() {
+  _p=$1; _rc=1; _old=$IFS; IFS=','; set -f
+  for _g in $2; do
+    [ -n "$_g" ] || continue
+    case "$_g" in */) _g="$_g*" ;; esac
+    # shellcheck disable=SC2254
+    case "$_p" in $_g) _rc=0; break ;; esac
+  done
+  set +f; IFS=$_old
+  return $_rc
+}
+
+sdir() { _d="$(git rev-parse --git-dir)/bpm"; mkdir -p "$_d"; printf '%s' "$_d"; }
+
+# sfind <name>: path of a state file, looking in this worktree's git dir first,
+# then the shared one (so a child in a linked worktree sees the main state).
+sfind() {
+  for _d in "$(git rev-parse --git-dir 2>/dev/null)" "$(git rev-parse --git-common-dir 2>/dev/null)"; do
+    [ -n "$_d" ] && [ -f "$_d/bpm/$1" ] && { printf '%s' "$_d/bpm/$1"; return 0; }
+  done
+  return 1
+}
+
+current_task() { _f=$(sfind current) && tr -d ' \r\n' < "$_f"; return 0; }
+task_base() { _f=$(sfind "base-$1") && tr -d ' \r\n' < "$_f"; return 0; }
+
+# The task file as committed, so a child cannot widen its own file list by
+# editing the working copy.
+task_head_file() {
+  _o="$(sdir)/task-$1.md"
+  git show "HEAD:$(tfile "$1")" > "$_o" 2>/dev/null || cp "$(tfile "$1")" "$_o" 2>/dev/null || return 1
+  printf '%s' "$_o"
+}
+
+unmet_deps() {
+  for _d in $(fm "$1" depends | tr ',' ' '); do
+    case "$_d" in -|'') continue ;; esac
+    _d=$(nid "$_d" 2>/dev/null) || { printf ' %s(invalid)' "$_d"; continue; }
+    _df=$(tfile "$_d")
+    if [ ! -f "$_df" ]; then printf ' %s(missing)' "$_d"
+    elif [ "$(fm "$_df" status)" != done ]; then printf ' %s' "$_d"; fi
+  done
+}
+
+find_tpl() {
+  for _d in "$SPEC/templates" "$SELF_DIR/../templates"; do
+    [ -f "$_d/$1" ] && { printf '%s' "$_d/$1"; return 0; }
+  done
+  echo "bpm: template $1 not found (run: bpm init)" >&2; return 1
+}
+
+# fill <template>: a line that is exactly {{NAME}} is replaced by the file in
+# $BPM_B_NAME; {{NAME}} inside a line is replaced by $BPM_V_NAME.
+fill() {
+  awk '
+    { sub(/\r$/, "") }
+    /^[{][{][A-Z_]+[}][}]$/ {
+      n = substr($0, 3, length($0) - 4); f = ENVIRON["BPM_B_" n]
+      if (f != "") { while ((getline l < f) > 0) print l; close(f); next }
+    }
+    {
+      rest = $0; out = ""
+      while (match(rest, /[{][{][A-Z_]+[}][}]/)) {
+        n = substr(rest, RSTART + 2, RLENGTH - 4)
+        out = out substr(rest, 1, RSTART - 1) ENVIRON["BPM_V_" n]
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      print out rest
+    }' "$1"
+}
+
+hooks_dir() { git rev-parse --git-path hooks; }
+
+# ---------------------------------------------------------------- init
+
+install_hook() {
+  _hp="$(hooks_dir)/$1"
+  mkdir -p "$(dirname "$_hp")"
+  if [ -f "$_hp" ] && ! grep -q 'bpm hook' "$_hp"; then
+    echo "bpm: existing $1 hook kept. Add this line to it:  sh scripts/bpm hook $1 \"\$@\" || exit 1"
+    return 0
+  fi
+  printf '%s\n' '#!/bin/sh' '# installed by bpm init' '[ -f scripts/bpm ] || exit 0' \
+    "exec sh scripts/bpm hook $1 \"\$@\"" > "$_hp"
+  chmod +x "$_hp" 2>/dev/null
+}
+
+add_line() { # add_line <file> <line>
+  grep -qxF "$2" "$1" 2>/dev/null || printf '%s\n' "$2" >> "$1"
+}
+
+cmd_init() {
+  need_git
+  claude=0
+  [ "${1:-}" = "--claude" ] && claude=1
+  [ -d .claude ] && claude=1
+  mkdir -p "$TASKS" "$SPEC/modules" "$SPEC/progress" "$SPEC/templates" scripts
+  tpl="$SELF_DIR/../templates"
+  if [ -d "$tpl" ]; then
+    for f in SPEC.md HANDOFF.md; do [ -f "$SPEC/$f" ] || cp "$tpl/$f" "$SPEC/$f"; done
+    for f in task.md module.md CHILD_PROMPT.md REVIEW_PROMPT.md; do
+      [ -f "$SPEC/templates/$f" ] || cp "$tpl/$f" "$SPEC/templates/$f"
+    done
+  fi
+  if [ ! "$SELF_DIR/bpm" -ef scripts/bpm ]; then
+    cp "$SELF_DIR/bpm" scripts/bpm
+    for f in smoke.sh smoke.ps1; do
+      [ -f "scripts/$f" ] || [ ! -f "$SELF_DIR/$f" ] || cp "$SELF_DIR/$f" "scripts/$f"
+    done
+  fi
+  chmod +x scripts/bpm 2>/dev/null
+  install_hook pre-commit
+  install_hook commit-msg
+  git config alias.bpm '!sh scripts/bpm'
+  add_line .gitattributes 'scripts/bpm text eol=lf'
+  add_line .gitattributes 'scripts/*.sh text eol=lf'
+  add_line .gitignore '.smoke/'
+  if [ $claude -eq 1 ] && [ -d "$SELF_DIR/../claude-agents" ]; then
+    mkdir -p .claude/agents
+    for f in "$SELF_DIR"/../claude-agents/*.md; do
+      [ -f ".claude/agents/$(basename "$f")" ] || cp "$f" .claude/agents/
+    done
+    echo "bpm: Claude Code agents bpm-worker and bpm-reviewer are in .claude/agents/"
+  fi
+  cat <<EOF
+bpm: ready. Run it from any shell as:  git bpm <command>
+Next:
+  1. fill in $SPEC/SPEC.md and the commands in scripts/smoke.sh
+  2. git bpm new "<title>" <module>     for each task
+  3. sh scripts/smoke.sh && git bpm baseline
+  4. commit $SPEC/ and scripts/, then: git bpm next
+EOF
+}
+
+# ---------------------------------------------------------------- tasks
+
+cmd_new() {
+  [ -n "${1:-}" ] || die "usage: bpm new \"<title>\" [module]"
+  tpl=$(find_tpl task.md) || exit 1
+  last=$(task_ids | tail -1)
+  id=$(( ${last:-0} + 1 ))
+  mkdir -p "$TASKS"
+  BPM_V_ID=$id; BPM_V_TITLE=$1; BPM_V_MODULE=${2:--}
+  export BPM_V_ID BPM_V_TITLE BPM_V_MODULE
+  fill "$tpl" > "$(tfile "$id")"
+  cmd_index >/dev/null
+  echo "created $(tfile "$id")"
+}
+
+cmd_index() {
+  out="$SPEC/TASKS.md"
+  {
+    echo "# Tasks"
+    echo
+    echo "Generated by \`git bpm index\` from \`tasks/*.md\`. Edit the task files, not this one."
+    echo
+    echo "| # | Task | Module | Depends | Status | Attempts | Cost |"
+    echo "|---|---|---|---|---|---|---|"
+    for id in $(task_ids); do
+      f=$(tfile "$id")
+      [ "$(fm "$f" stop)" = true ] && echo "| | **STOP**: wait for the user | | | | | |"
+      printf '| %s | [%s](tasks/%03d.md) | %s | %s | %s | %s | %s |\n' "$id" "$(fm "$f" title)" "$id" \
+        "$(fm "$f" module)" "$(fm "$f" depends)" "$(fm "$f" status)" "$(fm "$f" attempts)" "$(fm "$f" cost)"
+    done
+  } > "$out"
+  echo "wrote $out"
+}
+
+cmd_set() {
+  [ $# -ge 3 ] || die "usage: bpm set <id> <key> <value>"
+  id=$(nid "$1") || exit 1
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  fm_set "$f" "$2" "$3"
+  cmd_index >/dev/null
+  echo "task $id: $2 = $3"
+}
+
+cmd_stop() {
+  v=true
+  [ "${1:-}" = "--clear" ] && { v=false; shift; }
+  id=$(nid "${1:-}") || die "usage: bpm stop [--clear] <id>"
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  fm_set "$f" stop "$v"
+  cmd_index >/dev/null
+  if [ $v = true ]; then echo "the run will halt before task $id"; else echo "STOP before task $id cleared"; fi
+}
+
+# Exit codes: 0 a task is ready (or everything is done), 3 STOP marker,
+# 4 a task is already in progress, 5 nothing runnable, 6 needs escalation.
+cmd_next() {
+  need_git
+  cur=$(current_task)
+  if [ -n "$cur" ]; then
+    echo "task $cur is in progress. Finish it with: git bpm review $cur, then git bpm done $cur | git bpm fail $cur \"<what changes>\""
+    exit 4
+  fi
+  blocked=""; alldone=1
+  for id in $(task_ids); do
+    f=$(tfile "$id"); st=$(fm "$f" status)
+    case "$st" in 'done'|dropped) continue ;; esac
+    alldone=0
+    if [ "$(fm "$f" stop)" = true ]; then
+      echo "STOP before task $id: wait for the user. (They clear it with: git bpm stop --clear $id)"
+      exit 3
+    fi
+    att=$(fm "$f" attempts); att=${att:-0}
+    if [ "$st" != pending ] && [ "$att" -ge $MAX_ATTEMPTS ]; then
+      echo "ESCALATE: task $id failed $att times. Split it into smaller tasks or ask the user; do not retry it as it is."
+      exit 6
+    fi
+    unmet=$(unmet_deps "$f")
+    if [ -n "$unmet" ]; then
+      blocked="$blocked
+  task $id waits on:$unmet"
+      continue
+    fi
+    echo "next: task $id - $(fm "$f" title)"
+    [ "$st" = pending ] || echo "  (status $st, attempt $((att + 1)): something must change from the last attempt, see its Attempts section)"
+    echo "  git bpm start $id && git bpm prompt $id"
+    exit 0
+  done
+  [ -n "$(task_ids)" ] || { echo "no tasks yet. Create one with: git bpm new \"<title>\" <module>"; exit 5; }
+  if [ $alldone -eq 1 ]; then echo "all tasks are done or dropped"; exit 0; fi
+  echo "no runnable task:$blocked"
+  exit 5
+}
+
+snapshot() {
+  git -c core.quotepath=off status --porcelain --untracked-files=all | sed 's/^...//' | while IFS= read -r p; do
+    case "$p" in *' -> '*) p=${p##* -> } ;; esac
+    if [ -f "$p" ]; then printf '%s\t%s\n' "$(git hash-object -- "$p")" "$p"; else printf 'gone\t%s\n' "$p"; fi
+  done
+}
+
+cmd_start() {
+  need_git
+  force=0; id=""
+  for a in "$@"; do case "$a" in --force) force=1 ;; *) id=$(nid "$a") || exit 1 ;; esac; done
+  [ -n "$id" ] || die "usage: bpm start <id> [--force]"
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  cur=$(current_task); [ -z "$cur" ] || die "task $cur is already in progress"
+  git ls-files --error-unmatch "$f" >/dev/null 2>&1 && git diff --quiet HEAD -- "$f" \
+    || die "$f has uncommitted changes: commit the spec before starting the task"
+  st=$(fm "$f" status)
+  case "$st" in pending|needs-fix|reverted) ;; *) die "task $id has status '$st'" ;; esac
+  [ -n "$(norm_globs "$(fm "$f" files)")" ] || die "task $id has no files list"
+  if [ $force -eq 0 ]; then
+    [ "$(fm "$f" stop)" != true ] || die "STOP is set before task $id: wait for the user"
+    att=$(fm "$f" attempts); att=${att:-0}
+    [ "$st" = pending ] || [ "$att" -lt $MAX_ATTEMPTS ] || die "task $id failed $att times: split it or ask the user"
+    unmet=$(unmet_deps "$f"); [ -z "$unmet" ] || die "task $id waits on:$unmet"
+  fi
+  for h in pre-commit commit-msg; do
+    grep -q 'bpm hook' "$(hooks_dir)/$h" 2>/dev/null || echo "WARNING: $h hook is not installed (run: git bpm init)"
+  done
+  sd=$(sdir)
+  git rev-parse HEAD > "$sd/base-$id"
+  snapshot > "$sd/snapshot-$id"
+  rm -f "$sd/reads-$id" "$sd/verdict-$id" "$sd/end-$id"
+  echo "$id" > "$sd/current"
+  echo "task $id started at $(cut -c1-7 < "$sd/base-$id"). Commits may now touch only: $(norm_globs "$(fm "$f" files)")"
+  echo "Child prompt: git bpm prompt $id"
+}
+
+cmd_prompt() {
+  need_git
+  review=0; id=""
+  for a in "$@"; do case "$a" in --review) review=1 ;; *) id=$(nid "$a") || exit 1 ;; esac; done
+  [ -n "$id" ] || die "usage: bpm prompt <id> [--review]"
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  t="$(sdir)/tmp"; rm -rf "$t"; mkdir -p "$t"
+  mod=$(fm "$f" module); mf="$SPEC/modules/$mod.md"
+  section "$f" "Task" > "$t/task"
+  section "$f" "Acceptance check" > "$t/acc"
+  section "$f" "Context" | grep -v '^<' > "$t/ctx"
+  grep -q '[^[:space:]]' "$t/ctx" || echo "(none)" > "$t/ctx"
+  : > "$t/ifc"
+  if [ -f "$mf" ]; then
+    tr -d '\r' < "$mf" > "$t/mod"
+    for dep in $(section "$mf" "Depends on" | sed -nE 's/^[-*][[:space:]]*`?([A-Za-z0-9_.-]+)`?[[:space:]]*:.*/\1/p'); do
+      df="$SPEC/modules/$dep.md"
+      [ -f "$df" ] && { printf '### %s\n' "$dep"; section "$df" "Public interface"; echo; } >> "$t/ifc"
+    done
+  else
+    echo "(no module spec for '$mod')" > "$t/mod"
+  fi
+  [ -s "$t/ifc" ] || echo "(none)" > "$t/ifc"
+  norm_globs "$(fm "$f" files)" | tr ',' '\n' | sed 's/^/- /' > "$t/files"
+  BPM_B_TASK="$t/task"; BPM_B_ACCEPTANCE="$t/acc"; BPM_B_CONTEXT="$t/ctx"; BPM_B_MODULE_SPEC="$t/mod"
+  BPM_B_INTERFACES="$t/ifc"; BPM_B_FILES="$t/files"
+  BPM_V_ID=$id; BPM_V_TITLE=$(fm "$f" title); BPM_V_BUDGET=$(fm "$f" budget); BPM_V_EFFORT=$(fm "$f" effort)
+  BPM_V_SPEC_DIR=$SPEC; BPM_V_BUDGET=${BPM_V_BUDGET:-not set}
+  export BPM_B_TASK BPM_B_ACCEPTANCE BPM_B_CONTEXT BPM_B_MODULE_SPEC BPM_B_INTERFACES BPM_B_FILES
+  export BPM_V_ID BPM_V_TITLE BPM_V_BUDGET BPM_V_EFFORT BPM_V_SPEC_DIR
+  if [ $review -eq 1 ]; then
+    base=$(task_base "$id"); [ -n "$base" ] || die "task $id has no recorded base (start it first)"
+    git log --format='- %h %s' "$base..HEAD" > "$t/commits"
+    git diff --stat "$base..HEAD" > "$t/stat"
+    BPM_B_COMMITS="$t/commits"; BPM_B_DIFFSTAT="$t/stat"
+    BPM_V_BASE=$(printf '%s' "$base" | cut -c1-10); BPM_V_HEAD=$(git rev-parse --short=10 HEAD)
+    export BPM_B_COMMITS BPM_B_DIFFSTAT BPM_V_BASE BPM_V_HEAD
+    tpl=$(find_tpl REVIEW_PROMPT.md) || exit 1
+  else
+    tpl=$(find_tpl CHILD_PROMPT.md) || exit 1
+  fi
+  fill "$tpl"
+}
+
+# ---------------------------------------------------------------- review
+
+finding() { printf 'FINDING: %s\n' "$1" | tee -a "$REVIEW_OUT"; }
+
+# compare <result> <baseline>: lines are "name value" / "name value rule".
+# Rules: max, min, max+N%, min-N%, info (default).
+cmd_compare() {
+  res=${1:-.smoke/result.txt}; basef=${2:-$SPEC/baseline.txt}
+  [ -s "$res" ] || { echo "REGRESSION: no smoke result at $res"; return 1; }
+  [ -s "$basef" ] || { echo "REGRESSION: no baseline at $basef (record one with: git bpm baseline)"; return 1; }
+  awk '
+    { sub(/\r$/, "") }
+    NR == FNR { if (NF >= 2) r[$1] = $2; next }
+    /^#/ || NF < 2 { next }
+    {
+      name = $1; b = $2; rule = (NF >= 3) ? $3 : "info"
+      if (!(name in r)) {
+        if (rule != "info") { printf "  %-16s missing from the smoke result  REGRESSION\n", name; bad = 1 }
+        next
+      }
+      v = r[name]; ok = 1; pct = 0
+      if (match(rule, /[0-9.]+%/)) pct = substr(rule, RSTART, RLENGTH - 1) / 100
+      if (rule ~ /^max/) ok = (v + 0 <= b * (1 + pct))
+      else if (rule ~ /^min/) ok = (v + 0 >= b * (1 - pct))
+      printf "  %-16s %s (baseline %s, %s)%s\n", name, v, b, rule, ok ? "" : "  REGRESSION"
+      if (!ok) bad = 1
+    }
+    END { exit bad }' "$res" "$basef"
+}
+
+cmd_baseline() {
+  force=0; res=.smoke/result.txt
+  for a in "$@"; do case "$a" in --force) force=1 ;; *) res=$a ;; esac; done
+  [ -s "$res" ] || die "no smoke result at $res (run: sh scripts/smoke.sh)"
+  out="$SPEC/baseline.txt"
+  [ ! -f "$out" ] || [ $force -eq 1 ] || die "$out exists; the baseline only changes with the user's agreement (--force)"
+  {
+    echo "# Baseline recorded $(date +%Y-%m-%d) at $(git rev-parse --short HEAD 2>/dev/null)."
+    echo "# name value rule   rules: max | min | max+N% | min-N% | info"
+    awk '{ sub(/\r$/, "") } NF >= 2 {
+      rule = "info"
+      if ($1 == "tests_passed") rule = "min"
+      else if ($1 == "tests_failed" || $1 == "tests_rc" || $1 == "scenario_rc" || $1 == "error_lines") rule = "max"
+      print $1, $2, rule }' "$res"
+  } > "$out"
+  echo "wrote $out. Set a rule (for example max+10%) on any metric that must not regress."
+}
+
+review_tests() {
+  base=$1; head=$2
+  set -f
+  # shellcheck disable=SC2086
+  diff=$(git diff "$base..$head" -- $TEST_PATHS)
+  set +f
+  added=$(printf '%s\n' "$diff" | grep -E '^\+' | grep -v '^+++')
+  removed=$(printf '%s\n' "$diff" | grep -E '^-' | grep -v '^---')
+  skips=$(printf '%s\n' "$added" | grep -E \
+    '#\[ignore\]|@pytest\.mark\.(skip|xfail)|pytest\.skip\(|unittest\.skip|(it|test|describe)\.(skip|todo)\(|(^|[^A-Za-z])x(it|describe)\(|@Disabled|@Ignore|t\.Skip\(|\[Ignore\]|\[Fact\(Skip')
+  [ -z "$skips" ] || finding "skip markers added to tests:
+$skips"
+  rm_a=$(printf '%s\n' "$removed" | grep -cE 'assert|expect\(|should|require\.')
+  add_a=$(printf '%s\n' "$added" | grep -cE 'assert|expect\(|should|require\.')
+  [ "$rm_a" -le "$add_a" ] || finding "tests lost asserts: $rm_a removed, $add_a added"
+  early=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*return[[:space:];]*$')
+  [ -z "$early" ] || finding "bare early returns added in tests:
+$early"
+}
+
+review_callers() {
+  base=$1; head=$2
+  names=$(git diff "$base..$head" | grep -E '^\+' | grep -v '^+++' | \
+    sed -nE 's/^\+[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(export[[:space:]]+)?(async[[:space:]]+)?(fn|def|function|func)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\6/p' | sort -u)
+  for name in $names; do
+    case "$name" in test_*|Test*|_*|main) continue ;; esac
+    uses=$(git grep -wn -e "$name" "$head" -- . 2>/dev/null | grep -cvE "(fn|def|function|func)[[:space:]]+$name([^A-Za-z0-9_]|\$)")
+    [ "$uses" -gt 0 ] || finding "new function '$name' has no callers"
+  done
+}
+
+review_smoke() {
+  id=$1; head=$2; inplace=$3; sd=$(sdir)
+  if ! git cat-file -e "$head:scripts/smoke.sh" 2>/dev/null; then
+    finding "scripts/smoke.sh is not committed, so the task cannot be verified"
+    return
+  fi
+  rm -f "$sd/smoke-$id.txt"
+  if [ "$inplace" -eq 1 ]; then
+    sh scripts/smoke.sh > "$sd/smoke-$id.log" 2>&1; rc=$?
+    cp .smoke/result.txt "$sd/smoke-$id.txt" 2>/dev/null
+  else
+    tmp=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/bpm-review-$$")
+    if git worktree add --detach -q "$tmp/wt" "$head" 2>"$sd/smoke-$id.log"; then
+      (cd "$tmp/wt" && sh scripts/smoke.sh) >> "$sd/smoke-$id.log" 2>&1; rc=$?
+      cp "$tmp/wt/.smoke/result.txt" "$sd/smoke-$id.txt" 2>/dev/null
+      git worktree remove --force "$tmp/wt" >/dev/null 2>&1
+    else
+      rc=99
+    fi
+    rm -rf "$tmp"; git worktree prune >/dev/null 2>&1
+  fi
+  grep '^smoke:' "$sd/smoke-$id.log"
+  [ "$rc" -eq 0 ] || finding "smoke script failed with exit code $rc (log: $sd/smoke-$id.log)"
+  echo "baseline comparison:"
+  cmd_compare "$sd/smoke-$id.txt" "$SPEC/baseline.txt" || finding "regression against the baseline (see the comparison above)"
+}
+
+cmd_review() {
+  need_git
+  inplace=0; nosmoke=0; id=""
+  for a in "$@"; do
+    case "$a" in --in-place) inplace=1 ;; --no-smoke) nosmoke=1 ;; *) id=$(nid "$a") || exit 1 ;; esac
+  done
+  [ -n "$id" ] || die "usage: bpm review <id> [--in-place] [--no-smoke]"
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  base=$(task_base "$id"); [ -n "$base" ] || die "task $id has no recorded base (start it with: git bpm start $id)"
+  head=$(git rev-parse HEAD)
+  files=$(norm_globs "$(fm "$f" files)")
+  log="$SPEC/progress/$id.log"
+  sd=$(sdir); REVIEW_OUT="$sd/review-$id.txt"; : > "$REVIEW_OUT"
+  echo "review of task $id: $(printf '%s' "$base" | cut -c1-7)..$(printf '%s' "$head" | cut -c1-7)"
+
+  # 1. Commits exist and carry the task trailer.
+  commits=$(git rev-list "$base..$head")
+  [ -n "$commits" ] || finding "no commits since the task started"
+  for c in $commits; do
+    git log -1 --format=%B "$c" | grep -Eq "^Task: 0*$id[[:space:]]*\$" \
+      || finding "commit $(git log -1 --format='%h %s' "$c") has no 'Task: $id' trailer"
+    n=$(git show --name-only --format= "$c" | grep -c .)
+    [ "$n" -le "$MAX_FILES_PER_COMMIT" ] || finding "commit $(git log -1 --format='%h %s' "$c") touches $n files (max $MAX_FILES_PER_COMMIT): split the task"
+  done
+
+  # 2. Only the task's files were touched. The hook can be bypassed; this cannot.
+  git -c core.quotepath=off diff --name-only "$base..$head" | while IFS= read -r p; do
+    matches "$p" "$files" || [ "$p" = "$log" ] || finding "file outside the task's list was changed: $p"
+  done
+
+  # 3. Tests weakened, 4. functions nobody calls.
+  review_tests "$base" "$head"
+  review_callers "$base" "$head"
+
+  # 5. History rewrites since the task started.
+  base_time=$(git log -1 --format=%ct "$base")
+  rewrites=$(git log -g --format='%ct %h %gs' 2>/dev/null | awk -v t="$base_time" '$1 >= t { $1 = ""; print }' | \
+    grep -E 'reset:|rebase|amend|stash' | head -10)
+  [ -z "$rewrites" ] || finding "history was rewritten during the task:
+$rewrites"
+
+  # 6. The user's uncommitted files are untouched.
+  snap=$(sfind "snapshot-$id") && while IFS="$TAB" read -r h p; do
+    matches "$p" "$files" && continue
+    [ "$p" = "$log" ] && continue
+    if [ -f "$p" ]; then now=$(git hash-object -- "$p"); else now=gone; fi
+    [ "$now" = "$h" ] || finding "a file that was uncommitted before the task has changed: $p"
+  done < "$snap"
+
+  # 7. Smoke run on a clean checkout of the commit, compared with the baseline.
+  if [ $nosmoke -eq 1 ]; then echo "smoke run skipped (--no-smoke)"; else review_smoke "$id" "$head" "$inplace"; fi
+
+  nf=$(grep -c '^FINDING' "$REVIEW_OUT")
+  if [ "$nf" -gt 0 ]; then
+    echo "review: FAIL ($nf findings)"; echo "FAIL $head" > "$sd/verdict-$id"; exit 1
+  fi
+  if [ $nosmoke -eq 1 ]; then
+    echo "review: no mechanical findings, but the smoke run was skipped"; echo "PARTIAL $head" > "$sd/verdict-$id"; exit 0
+  fi
+  echo "PASS $head" > "$sd/verdict-$id"
+  echo "review: PASS (mechanical checks only)"
+  echo "Still to do by the reviewer: the acceptance check, a real end-to-end run with its reverse path, ERROR counts in runtime logs, migrations for changed formats, new dependencies."
+}
+
+# ---------------------------------------------------------------- finish
+
+clear_current() {
+  for _d in "$(git rev-parse --git-dir)" "$(git rev-parse --git-common-dir)"; do
+    [ -f "$_d/bpm/current" ] && [ "$(tr -d ' \r\n' < "$_d/bpm/current")" = "$1" ] && rm -f "$_d/bpm/current"
+  done
+}
+
+cmd_done() {
+  need_git
+  force=0; id=""; cost=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1 ;;
+      --cost) shift; cost=${1:-} ;;
+      *) id=$(nid "$1") || exit 1 ;;
+    esac
+    shift
+  done
+  [ -n "$id" ] || die "usage: bpm done <id> [--cost \"<tokens>\"] [--force]"
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  if [ $force -eq 0 ]; then
+    v=$(sfind "verdict-$id") && v=$(cat "$v")
+    [ "$v" = "PASS $(git rev-parse HEAD)" ] \
+      || die "task $id has no passing review of the current commit (run: git bpm review $id). Use --force only if the user agrees."
+  fi
+  clear_current "$id"
+  git rev-parse HEAD > "$(sdir)/end-$id"
+  fm_set "$f" status done
+  [ -z "$cost" ] || fm_set "$f" cost "$cost"
+  cmd_index >/dev/null
+  echo "task $id is done. Now update its module spec and HANDOFF.md, then commit $SPEC/."
+  cmd_check >/dev/null 2>&1 || echo "note: git bpm check reports problems; run it and fix them in the same commit."
+}
+
+cmd_fail() {
+  need_git
+  id=$(nid "${1:-}") || die "usage: bpm fail <id> \"<what the next attempt changes>\""
+  note=${2:-}
+  [ -n "$note" ] || die "say what the next attempt changes (narrower task, different approach, stronger model or higher effort). An identical retry fails the same way."
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  clear_current "$id"
+  git rev-parse HEAD > "$(sdir)/end-$id"
+  att=$(fm "$f" attempts); att=$(( ${att:-0} + 1 ))
+  fm_set "$f" attempts "$att"
+  fm_set "$f" status needs-fix
+  grep -q '^## Attempts' "$f" || printf '\n## Attempts\n' >> "$f"
+  printf -- '- attempt %s failed %s. Next attempt changes: %s\n' "$att" "$(date +%Y-%m-%d)" "$note" >> "$f"
+  cmd_index >/dev/null
+  echo "task $id: attempt $att failed, status needs-fix."
+  base=$(task_base "$id")
+  [ -z "$base" ] || [ -z "$(git rev-list "$base..HEAD" 2>/dev/null)" ] || echo "Its commits are still in the history. Remove them with: git bpm revert $id"
+  [ "$att" -lt $MAX_ATTEMPTS ] || echo "ESCALATE: $att failed attempts. Split the task or ask the user before any further attempt."
+}
+
+cmd_revert() {
+  need_git
+  id=$(nid "${1:-}") || die "usage: bpm revert <id>"
+  f=$(tfile "$id"); [ -f "$f" ] || die "no task file $f"
+  cur=$(current_task)
+  [ -z "$cur" ] || die "task $cur is in progress; finish it first (git bpm fail $cur \"...\")"
+  base=$(task_base "$id"); [ -n "$base" ] || die "task $id has no recorded base"
+  # Everything committed between start and done/fail belongs to the task,
+  # including commits that bypassed the hooks and carry no trailer.
+  end=$(sfind "end-$id") && end=$(tr -d ' \r\n' < "$end")
+  n=0
+  for c in $(git rev-list "$base..${end:-HEAD}"); do
+    git revert --no-edit "$c" >/dev/null || die "revert of $c stopped on a conflict. Resolve it (git revert --continue), then run this command again."
+    n=$((n + 1))
+  done
+  fm_set "$f" status reverted
+  cmd_index >/dev/null
+  git rev-parse HEAD > "$(sdir)/base-$id"
+  echo "task $id: reverted $n commits (git revert, no history rewritten), status reverted."
+  deps=""
+  for o in $(task_ids); do
+    of=$(tfile "$o")
+    case ",$(fm "$of" depends | tr -d ' ')," in *",$id,"*|*",0$id,"*|*",00$id,"*)
+      [ "$(fm "$of" status)" = done ] && deps="$deps $o" ;;
+    esac
+  done
+  [ -z "$deps" ] || echo "Done tasks that depend on it and must be revisited:$deps"
+}
+
+# ---------------------------------------------------------------- status and checks
+
+cmd_status() {
+  need_git
+  cur=$(current_task)
+  if [ -n "$cur" ]; then echo "current: task $cur (base $(task_base "$cur" | cut -c1-7))"; else echo "current: none"; fi
+  for h in pre-commit commit-msg; do
+    grep -q 'bpm hook' "$(hooks_dir)/$h" 2>/dev/null || echo "WARNING: $h hook is not installed (run: git bpm init)"
+  done
+  counts=$(git log --format=%B 2>/dev/null | sed -nE 's/^Task: 0*([0-9]+)[[:space:]]*$/\1/p' | sort -n | uniq -c)
+  printf '%4s  %-11s %3s %7s  %s\n' '#' status att commits title
+  total=0; ndone=0; warn=""
+  for id in $(task_ids); do
+    f=$(tfile "$id"); st=$(fm "$f" status); att=$(fm "$f" attempts)
+    n=$(printf '%s\n' "$counts" | awk -v id="$id" '$2 == id { print $1 }'); n=${n:-0}
+    shown=$st; [ "$id" != "$cur" ] || shown="in progress"
+    printf '%4s  %-11s %3s %7s  %s\n' "$id" "$shown" "${att:-0}" "$n" "$(fm "$f" title)"
+    total=$((total + 1))
+    case "$st" in 'done'|dropped) ndone=$((ndone + 1)) ;; esac
+    if [ "$st" = pending ] && [ "$n" -gt 0 ] && [ "$id" != "$cur" ]; then
+      warn="$warn
+  task $id is pending but has $n commits: an interrupted run. Review them or revert them before restarting it."
+    fi
+    if [ "$st" = done ] && [ "$n" -eq 0 ]; then
+      warn="$warn
+  task $id is done but no commit carries 'Task: $id'."
+    fi
+  done
+  echo "$ndone of $total tasks done or dropped"
+  [ -z "$warn" ] || echo "WARNINGS:$warn"
+}
+
+cmd_check() {
+  need_git
+  out="$(sdir)/check.txt"; : > "$out"
+  err() { printf 'ERROR: %s\n' "$1" | tee -a "$out"; }
+
+  for id in $(task_ids); do
+    f=$(tfile "$id")
+    [ "$(fm "$f" id | sed 's/^0*//')" = "$id" ] || err "task $id: the id in the file does not match its name"
+    [ -n "$(fm "$f" title)" ] || err "task $id: no title"
+    st=$(fm "$f" status)
+    case "$st" in pending|'done'|needs-fix|reverted) ;; dropped) continue ;; *) err "task $id: unknown status '$st'" ;; esac
+    [ -n "$(norm_globs "$(fm "$f" files)")" ] || err "task $id: no files list"
+    acc=$(section "$f" "Acceptance check" | head -1)
+    case "$acc" in ''|'<'*) err "task $id: no acceptance check" ;; esac
+    m=$(fm "$f" module)
+    [ -z "$m" ] || [ "$m" = "-" ] || [ -f "$SPEC/modules/$m.md" ] || err "task $id: module '$m' has no file $SPEC/modules/$m.md"
+    for d in $(fm "$f" depends | tr ',' ' '); do
+      case "$d" in -|'') continue ;; esac
+      d=$(nid "$d" 2>/dev/null) && [ -f "$(tfile "$d")" ] || err "task $id: depends on a task that does not exist ($d)"
+    done
+  done
+
+  modlist="$(sdir)/modules.txt"; : > "$modlist"
+  for mf in "$SPEC"/modules/*.md; do
+    [ -f "$mf" ] || continue
+    name=$(basename "$mf" .md)
+    owned=$(section "$mf" "Owned files" | sed -nE 's/^[-*][[:space:]]*//p' | grep -v '^<' | tr -d '`\r' | tr '\n' ',')
+    owned=$(norm_globs "$owned")
+    printf '%s\t%s\n' "$name" "$owned" >> "$modlist"
+    section "$mf" "Public interface" | awk -F'|' '
+      /^\|/ { c = $2; gsub(/`/, "", c); sub(/\(.*/, "", c); gsub(/^[ \t]+|[ \t]+$/, "", c)
+              if (c == "" || c == "Name" || c ~ /^[-: ]+$/ || c ~ /[<> ]/) next; print c }' | while IFS= read -r iname; do
+      set -f; _old=$IFS; IFS=','
+      # shellcheck disable=SC2086
+      set -- $owned
+      IFS=$_old; set +f
+      [ $# -gt 0 ] || set -- . ":(exclude)$SPEC"
+      git grep --untracked -qwF -e "$iname" -- "$@" 2>/dev/null \
+        || err "module $name: interface '$iname' is in the spec but not in the module's files"
+    done
+  done
+
+  if grep -q "$TAB." "$modlist"; then
+    unowned="$(sdir)/unowned.txt"; : > "$unowned"
+    git -c core.quotepath=off ls-files | while IFS= read -r p; do
+      case "$p" in "$SPEC"/*|scripts/bpm|scripts/smoke.*|.git*|.claude/*) continue ;; esac
+      owners=""
+      while IFS="$TAB" read -r name globs; do
+        [ -n "$globs" ] && matches "$p" "$globs" && owners="$owners $name"
+      done < "$modlist"
+      # shellcheck disable=SC2086
+      set -- $owners
+      [ $# -le 1 ] || err "file $p is owned by more than one module:$owners"
+      [ $# -ne 0 ] || printf '%s\n' "$p" >> "$unowned"
+    done
+    n=$(grep -c . "$unowned")
+    if [ "$n" -gt 0 ]; then
+      echo "NOTE: $n tracked files belong to no module, for example:"
+      head -5 "$unowned" | sed 's/^/  /'
+    fi
+  fi
+
+  ne=$(grep -c '^ERROR' "$out")
+  if [ "$ne" -gt 0 ]; then echo "check: $ne errors"; return 1; fi
+  echo "check: ok"
+}
+
+# ---------------------------------------------------------------- hooks
+
+hook_pre_commit() {
+  id=$(current_task); [ -n "$id" ] || exit 0
+  tf=$(task_head_file "$id") || { echo "bpm: task $id is in progress but its task file is missing" >&2; exit 1; }
+  files=$(norm_globs "$(fm "$tf" files)")
+  log="$SPEC/progress/$id.log"
+  bad=$(git -c core.quotepath=off diff --cached --name-only --diff-filter=ACDMRT | while IFS= read -r p; do
+    matches "$p" "$files" || [ "$p" = "$log" ] || printf '  %s\n' "$p"
+  done)
+  [ -z "$bad" ] && exit 0
+  {
+    echo "bpm: task $id may only touch: $files"
+    echo "Rejected files:"
+    echo "$bad"
+    echo "Unstage them. If the task needs them, stop and report that to the manager."
+  } >&2
+  exit 1
+}
+
+hook_commit_msg() {
+  id=$(current_task); [ -n "$id" ] || exit 0
+  [ -n "${1:-}" ] && [ -f "$1" ] || exit 0
+  grep -Eq "^Task: 0*$id[[:space:]]*\$" "$1" && exit 0
+  git interpret-trailers --in-place --trailer "Task: $id" "$1"
+  exit 0
+}
+
+json_str() { # json_str <key>  (reads $HOOK_INPUT)
+  printf '%s' "$HOOK_INPUT" | tr '\n' ' ' | \
+    sed -nE 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' | sed 's/\\\\/\\/g; s/\\"/"/g'
+}
+
+relpath() {
+  printf '%s\n' "$1" | tr '\\' '/' | sed -E 's|^/([A-Za-z])/|\1:/|' | \
+    awk -v r="$(git rev-parse --show-toplevel)" '{
+      n = length(r)
+      if (tolower(substr($0, 1, n + 1)) == tolower(r "/")) print substr($0, n + 2); else print $0 }'
+}
+
+# PreToolUse hook for the bpm-worker Claude Code agent. Exit 2 blocks the call
+# and shows stderr to the agent.
+hook_claude_pretool() {
+  HOOK_INPUT=$(cat)
+  id=$(current_task); [ -n "$id" ] || exit 0
+  tf=$(task_head_file "$id") || exit 0
+  files=$(norm_globs "$(fm "$tf" files)")
+  tool=$(json_str tool_name)
+  case "$tool" in
+    Read|Edit|Write)
+      p=$(relpath "$(json_str file_path)")
+      [ -n "$p" ] || exit 0
+      if matches "$p" "$files" || [ "$p" = "$SPEC/progress/$id.log" ]; then exit 0; fi
+      if [ "$tool" != Read ]; then
+        echo "bpm: task $id may only edit: $files. Do not edit $p; stop and report the change you need." >&2
+        exit 2
+      fi
+      reads="$(sdir)/reads-$id"; touch "$reads"
+      grep -qxF "$p" "$reads" && exit 0
+      if [ "$(grep -c . "$reads")" -ge "$EXTRA_READS" ]; then
+        echo "bpm: task $id has used its $EXTRA_READS reads outside its file list. Stop exploring; report what you need and why." >&2
+        exit 2
+      fi
+      printf '%s\n' "$p" >> "$reads"
+      ;;
+    Bash)
+      cmd=$(json_str command)
+      if printf '%s' "$cmd" | grep -Eq \
+'(^|[;&|(])[[:space:]]*(find|rg|ag|fd|tree)([[:space:]]|$)|(^|[;&|(])[[:space:]]*grep[[:space:]][^;&|]*(-[A-Za-z]*[rR]|--recursive)|(^|[;&|(])[[:space:]]*ls[[:space:]][^;&|]*-[A-Za-z]*R|git[[:space:]]+(grep|ls-files|ls-tree)([[:space:]]|$)'; then
+        echo "bpm: searching or listing the repo is not part of task $id. Read only your listed files and what they import; report anything else you need." >&2
+        exit 2
+      fi
+      if printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+(reset|rebase|stash|push)([[:space:]]|$)|--amend|--no-verify'; then
+        echo "bpm: reset, rebase, stash, amend, push and --no-verify are not allowed in a task. Make a new commit instead." >&2
+        exit 2
+      fi
+      ;;
+  esac
+  exit 0
+}
+
+# ---------------------------------------------------------------- main
+
+cmd_help() {
+  cat <<'EOF'
+bpm - task runner for the big-project-manager skill      (git bpm <command>)
+
+Setup
+  init [--claude]            scaffold docs/spec/, install hooks and the git alias
+  new "<title>" [module]     create the next task file (numbers are never reused)
+  baseline [--force]         record .smoke/result.txt as docs/spec/baseline.txt
+
+Run
+  next                       which task is next; halts at STOP and after 2 failures
+  start <id>                 record the base commit and turn the commit guard on
+  prompt <id> [--review]     print the child prompt, or the reviewer prompt
+  review <id> [--in-place] [--no-smoke]
+                             mechanical review: files touched, weakened tests,
+                             uncalled functions, history rewrites, the user's
+                             uncommitted files, smoke run vs the baseline
+  done <id> [--cost "<n>"]   needs a passing review of the current commit
+  fail <id> "<change>"       count the attempt; say what the next one changes
+  revert <id>                git revert the task's commits, mark it reverted
+
+Inspect
+  status                     tasks, attempts, commits per task (from 'Task: N'
+                             trailers), and anything inconsistent
+  check                      task files are complete, every interface in a module
+                             spec exists in code, no file has two owners
+  compare [result] [baseline]
+  index                      regenerate docs/spec/TASKS.md
+  set <id> <key> <value>     edit a task's frontmatter (for example status dropped)
+  stop [--clear] <id>        halt the run before a task until the user clears it
+
+Environment: BPM_SPEC_DIR (docs/spec), BPM_TEST_PATHS, BPM_MAX_FILES_PER_COMMIT (15),
+BPM_EXTRA_READS (12, reads outside the file list allowed to a bpm-worker).
+EOF
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+case "$cmd" in help|-h|--help) cmd_help; exit 0 ;; esac
+top=$(git rev-parse --show-toplevel 2>/dev/null) && cd "$top" || die "not inside a git repository"
+
+case "$cmd" in
+  init) cmd_init "$@" ;;
+  new) cmd_new "$@" ;;
+  index) cmd_index ;;
+  set) cmd_set "$@" ;;
+  stop) cmd_stop "$@" ;;
+  next) cmd_next ;;
+  start) cmd_start "$@" ;;
+  prompt) cmd_prompt "$@" ;;
+  review) cmd_review "$@" ;;
+  compare) cmd_compare "$@" ;;
+  baseline) cmd_baseline "$@" ;;
+  'done') cmd_done "$@" ;;
+  fail) cmd_fail "$@" ;;
+  revert) cmd_revert "$@" ;;
+  status) cmd_status ;;
+  check) cmd_check ;;
+  hook)
+    h=${1:-}; [ $# -gt 0 ] && shift
+    case "$h" in
+      pre-commit) hook_pre_commit ;;
+      commit-msg) hook_commit_msg "$@" ;;
+      claude-pretool) hook_claude_pretool ;;
+      *) die "unknown hook '$h'" ;;
+    esac ;;
+  *) die "unknown command '$cmd' (git bpm help)" ;;
+esac

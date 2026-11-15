@@ -1,0 +1,20 @@
+[
+  {"query": "take over this repo and finish the remaining work", "should_trigger": true},
+  {"query": "I need to build a full inventory system: API, worker, admin UI. Plan it and get going, it'll take days", "should_trigger": true},
+  {"query": "we're halfway through the migration from last session, pick it up where it stopped", "should_trigger": true},
+  {"query": "split this rewrite across sub-agents and make sure each one's work is actually verified", "should_trigger": true},
+  {"query": "this feature set won't fit in one context window, how do we run it without losing the plan", "should_trigger": true},
+  {"query": "finish the rest of the TODO.md items in this project, there are about forty", "should_trigger": true},
+  {"query": "port the whole desktop app from Electron to Tauri", "should_trigger": true},
+  {"query": "resume the project in docs/spec, HANDOFF.md says task 12 is next", "should_trigger": true},
+  {"query": "fix the null check in utils/date.ts", "should_trigger": false},
+  {"query": "add a --verbose flag to the CLI", "should_trigger": false},
+  {"query": "explain how the auth middleware works", "should_trigger": false},
+  {"query": "rename this variable across the file", "should_trigger": false},
+  {"query": "write a unit test for parse_config", "should_trigger": false},
+  {"query": "try out whether sqlite can handle 5k writes a second, quick spike", "should_trigger": false},
+  {"query": "review my PR for bugs", "should_trigger": false},
+  {"query": "why is this test flaky?", "should_trigger": false},
+  {"query": "bump the version and update the changelog", "should_trigger": false},
+  {"query": "add a dark mode toggle to the settings page", "should_trigger": false}
+]

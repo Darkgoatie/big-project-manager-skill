@@ -1,0 +1,9 @@
+# Baseline recorded 2026-11-03 at 4c1e9aa.
+# name value rule   rules: max | min | max+N% | min-N% | info
+build_s 3 info
+tests_rc 0 max
+tests_passed 14 min
+tests_failed 0 max
+scenario_rc 0 max
+error_lines 0 max
+p95_ms 12 max+25%

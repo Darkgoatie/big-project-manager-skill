@@ -13,3 +13,6 @@ Updated: YYYY-MM-DD, after task <id>
 
 ## Next
 - task <id>
+
+## For the next session
+Read this file and run `git bpm status`. Do not read earlier transcripts. Manager sessions so far: <n>.

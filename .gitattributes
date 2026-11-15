@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings or sh fails on Windows checkouts.
+scripts/bpm text eol=lf
+*.sh text eol=lf
+templates/*.md text eol=lf

@@ -15,6 +15,8 @@ Does NOT: <list>
 ## Depends on
 - <module>: <interfaces used>
 
+Must never depend on: <modules>
+
 ## Owned files
 - <path>
 

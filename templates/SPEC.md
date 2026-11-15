@@ -22,9 +22,4 @@ Platform, stack, performance targets.
 |---|---|---|---|
 
 ## Baseline
-| Metric | Value | Command |
-|---|---|---|
-| Tests passing | | |
-| Build time | | |
-| ERROR lines, standard run | | |
-| <perf metric> | | |
+In `baseline.txt`, recorded by `git bpm baseline` on YYYY-MM-DD. Smoke scenario: <what scripts/smoke.sh runs>.

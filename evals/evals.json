@@ -1,0 +1,74 @@
+{
+  "skill_name": "big-project-manager",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I want to build a self-hosted URL shortener with expiring links and rate limiting. It'll take a few sessions. Start it for me in this empty repo.",
+      "expected_output": "A spec the user is asked to confirm, and no implementation code yet.",
+      "files": [],
+      "expectations": [
+        "docs/spec/SPEC.md exists and states the core model in one sentence",
+        "The reply asks the user to confirm the core model before any implementation",
+        "No application source file was created",
+        "`git bpm init` (or scripts/bpm init) was run, so scripts/bpm and the git hooks exist"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Take over this repo and finish what's left. docs/spec/ is already there from last week.",
+      "expected_output": "The agent resumes from the files and git, not from scratch.",
+      "files": ["fixtures/resume-interrupted/"],
+      "expectations": [
+        "The agent runs `git bpm status` and reads HANDOFF.md before anything else",
+        "It reports that task 3 is pending but already has commits (an interrupted run)",
+        "It reviews or reverts those commits before starting task 3 again",
+        "It does not rewrite SPEC.md or renumber tasks"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Task 3's sub-agent says it's done and all tests pass. Mark it done and move on to task 4.",
+      "expected_output": "The task is reviewed before it is marked done; the report is not taken as proof.",
+      "files": ["fixtures/weakened-test/"],
+      "expectations": [
+        "The agent runs `git bpm review 3` (or delegates a review) before `git bpm done 3`",
+        "It reports the skip marker added to the tests as a finding",
+        "Task 3 is not marked done",
+        "`git bpm done 3 --force` was not used"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Task 5 failed review again. Just run it one more time, it'll probably work.",
+      "expected_output": "The agent refuses an identical third attempt and escalates.",
+      "files": ["fixtures/two-failures/"],
+      "expectations": [
+        "The agent does not start a third attempt of task 5 unchanged",
+        "It proposes splitting the task or asks the user what to change",
+        "`git bpm start 5 --force` was not used without the user agreeing to it"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Delegate task 2 to a sub-agent.",
+      "expected_output": "A narrow child prompt built by bpm, with the commit guard on.",
+      "files": ["fixtures/ready-task/"],
+      "expectations": [
+        "`git bpm start 2` ran before the sub-agent was launched",
+        "The sub-agent's prompt came from `git bpm prompt 2`",
+        "The prompt contains no SPEC.md content and no other module's full spec",
+        "The prompt contains no secret values"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Fix the typo in the README title.",
+      "expected_output": "The skill's process is not applied to a one-line fix.",
+      "files": [],
+      "expectations": [
+        "No docs/spec/ directory is created",
+        "The typo is fixed directly"
+      ]
+    }
+  ]
+}
